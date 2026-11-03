@@ -46,10 +46,10 @@ def _load_data():
     order_items = read("order_items")
 
     products = products.merge(categories[["category_id", "name"]], on="category_id", how="left")
-    products.rename(columns={"name_x": "name", "name_y": "category"}, inplace=True)
+    products = products.rename(columns={"name_x": "name", "name_y": "category"})
 
     orders = orders.merge(customers[["customer_id", "name", "phone"]], on="customer_id", how="left")
-    orders.rename(columns={"name": "customer_name"}, inplace=True)
+    orders = orders.rename(columns={"name": "customer_name"})
 
     order_items = order_items.merge(
         products[["product_id", "name", "price_brl"]], on="product_id", how="left"
