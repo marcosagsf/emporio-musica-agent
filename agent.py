@@ -6,6 +6,7 @@ Configuração via arquivo .env na raiz do projeto.
 
 import json
 import sys
+import unicodedata
 from pathlib import Path
 
 import pandas as pd
@@ -24,7 +25,7 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -35,7 +36,7 @@ DATA_DIR = Path(__file__).parent / "data"
 
 def _load_data():
     def read(name):
-        return pd.read_csv(DATA_DIR / f"desafio_tecnico_ai_eng - {name}.csv", encoding="latin1")
+        return pd.read_csv(DATA_DIR / f"desafio_tecnico_ai_eng - {name}.csv", encoding="utf-8-sig")
 
     products = read("products")
     categories = read("categories")
@@ -77,40 +78,6 @@ except Exception as e:
 # ---------------------------------------------------------------------------
 
 
-def search_products(
-    query: str = "",
-    category: str = "",
-    max_price: float = None,
-    min_price: float = None,
-    in_stock_only: bool = True,
-) -> dict:
-    df = PRODUCTS.copy()
-    if in_stock_only:
-        df = df[df["stock_quantity"] > 0]
-    df = df[df["status"] == "active"]
-    if category:
-        df = df[df["category"].str.lower().str.contains(category.lower(), na=False)]
-    if max_price is not None:
-        df = df[df["price_brl"] <= max_price]
-    if min_price is not None:
-        df = df[df["price_brl"] >= min_price]
-    if query:
-        mask = (
-            df["name"].str.lower().str.contains(query.lower(), na=False)
-            | df["description"].str.lower().str.contains(query.lower(), na=False)
-            | df["category"].str.lower().str.contains(query.lower(), na=False)
-        )
-        df = df[mask]
-    if df.empty:
-        return {"found": False, "message": "Nenhum produto encontrado com esses critérios."}
-    results = (
-        df[["product_id", "name", "category", "price_brl", "stock_quantity", "description"]]
-        .head(10)
-        .to_dict("records")
-    )
-    return {"found": True, "count": len(df), "products": results}
-
-
 def get_order_status(
     order_id: int = None, customer_name: str = "", customer_phone: str = ""
 ) -> dict:
@@ -147,6 +114,47 @@ def get_active_promotions() -> dict:
         ["product_id", "name", "description", "discount_percent", "price_brl", "discounted_price", "stock_quantity"]
     ].to_dict("records")
     return {"found": True, "promotions": records}
+
+
+def _normalize(s: str) -> str:
+    """Lowercase + remove accents for accent-insensitive matching."""
+    return unicodedata.normalize("NFD", s.lower()).encode("ascii", "ignore").decode()
+
+
+def search_products(
+    query: str = "",
+    category: str = "",
+    max_price: float = None,
+    min_price: float = None,
+    in_stock_only: bool = True,
+) -> dict:
+    df = PRODUCTS.copy()
+    if in_stock_only:
+        df = df[df["stock_quantity"] > 0]
+    df = df[df["status"] == "active"]
+    if category:
+        cat_norm = _normalize(category)
+        df = df[df["category"].apply(_normalize).str.contains(cat_norm, na=False)]
+    if max_price is not None:
+        df = df[df["price_brl"] <= max_price]
+    if min_price is not None:
+        df = df[df["price_brl"] >= min_price]
+    if query:
+        q_norm = _normalize(query)
+        mask = (
+            df["name"].apply(_normalize).str.contains(q_norm, na=False)
+            | df["description"].apply(_normalize).str.contains(q_norm, na=False)
+            | df["category"].apply(_normalize).str.contains(q_norm, na=False)
+        )
+        df = df[mask]
+    if df.empty:
+        return {"found": False, "message": "Nenhum produto encontrado com esses critérios."}
+    results = (
+        df[["product_id", "name", "category", "price_brl", "stock_quantity", "description"]]
+        .head(10)
+        .to_dict("records")
+    )
+    return {"found": True, "count": len(df), "products": results}
 
 
 TOOL_HANDLERS = {
@@ -263,49 +271,51 @@ ANTHROPIC_TOOLS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Gemini tool schemas
+# Gemini tool schemas (google-genai SDK format)
 # ---------------------------------------------------------------------------
 
-GEMINI_TOOLS = [
-    {
-        "function_declarations": [
-            {
-                "name": "search_products",
-                "description": (
+
+def _build_gemini_tools():
+    from google.genai import types
+
+    return [
+        types.Tool(function_declarations=[
+            types.FunctionDeclaration(
+                name="search_products",
+                description=(
                     "Busca produtos no catálogo. Use para consultas de preço, disponibilidade, "
                     "comparação de modelos ou recomendações."
                 ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Termo de busca livre"},
-                        "category": {"type": "string", "description": "Ex: Guitarras, Violões, Baterias"},
-                        "max_price": {"type": "number", "description": "Preço máximo em reais"},
-                        "min_price": {"type": "number", "description": "Preço mínimo em reais"},
-                        "in_stock_only": {"type": "boolean", "description": "Somente com estoque"},
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "query": types.Schema(type=types.Type.STRING, description="Termo de busca livre"),
+                        "category": types.Schema(type=types.Type.STRING, description="Ex: Guitarras, Violões, Baterias"),
+                        "max_price": types.Schema(type=types.Type.NUMBER, description="Preço máximo em reais"),
+                        "min_price": types.Schema(type=types.Type.NUMBER, description="Preço mínimo em reais"),
+                        "in_stock_only": types.Schema(type=types.Type.BOOLEAN, description="Somente com estoque"),
                     },
-                },
-            },
-            {
-                "name": "get_order_status",
-                "description": "Consulta status de pedido por order_id, nome ou telefone do cliente.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "order_id": {"type": "integer", "description": "Número do pedido"},
-                        "customer_name": {"type": "string", "description": "Nome do cliente"},
-                        "customer_phone": {"type": "string", "description": "Telefone (só números)"},
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="get_order_status",
+                description="Consulta status de pedido por order_id, nome ou telefone do cliente.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "order_id": types.Schema(type=types.Type.INTEGER, description="Número do pedido"),
+                        "customer_name": types.Schema(type=types.Type.STRING, description="Nome do cliente"),
+                        "customer_phone": types.Schema(type=types.Type.STRING, description="Telefone (só números)"),
                     },
-                },
-            },
-            {
-                "name": "get_active_promotions",
-                "description": "Retorna promoções ativas com preços originais, descontos e preços finais.",
-                "parameters": {"type": "object", "properties": {}},
-            },
-        ]
-    }
-]
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="get_active_promotions",
+                description="Retorna promoções ativas com preços originais, descontos e preços finais.",
+                parameters=types.Schema(type=types.Type.OBJECT, properties={}),
+            ),
+        ])
+    ]
 
 # ---------------------------------------------------------------------------
 # Provider: Anthropic
@@ -346,32 +356,28 @@ def run_anthropic(history: list, user_input: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Provider: Google Gemini
+# Provider: Google Gemini (google-genai SDK)
 # ---------------------------------------------------------------------------
 
 
 def run_gemini(chat_session, user_input: str) -> str:
-    import google.generativeai as genai
+    """
+    Envia uma mensagem e resolve chamadas de função manualmente até obter
+    uma resposta de texto final.
+    """
+    from google.genai import types
 
     response = chat_session.send_message(user_input)
 
     # Agentic loop: resolve tool calls until the model produces a text response
-    while True:
-        function_calls = [p for p in response.parts if p.function_call.name]
-        if not function_calls:
-            break
-
-        # Execute all function calls and send results back in one turn
+    while response.function_calls:
         tool_response_parts = []
-        for part in function_calls:
-            fc = part.function_call
+        for fc in response.function_calls:
             result = call_tool(fc.name, dict(fc.args))
             tool_response_parts.append(
-                genai.protos.Part(
-                    function_response=genai.protos.FunctionResponse(
-                        name=fc.name,
-                        response={"result": json.dumps(result, ensure_ascii=False, default=str)},
-                    )
+                types.Part.from_function_response(
+                    name=fc.name,
+                    response={"result": json.dumps(result, ensure_ascii=False, default=str)},
                 )
             )
         response = chat_session.send_message(tool_response_parts)
@@ -414,15 +420,17 @@ def main():
         if not GOOGLE_API_KEY or GOOGLE_API_KEY.startswith("AIza..."):
             sys.exit("Erro: GOOGLE_API_KEY nao configurada no arquivo .env")
 
-        import google.generativeai as genai
+        from google import genai
+        from google.genai import types
 
-        genai.configure(api_key=GOOGLE_API_KEY)
-        model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL,
-            tools=GEMINI_TOOLS,
-            system_instruction=SYSTEM_PROMPT,
+        client = genai.Client(api_key=GOOGLE_API_KEY)
+        chat_session = client.chats.create(
+            model=GEMINI_MODEL,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                tools=_build_gemini_tools(),
+            ),
         )
-        chat_session = model.start_chat()
 
         while True:
             try:
